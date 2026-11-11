@@ -5,9 +5,13 @@ Aplikasi web yang menangkap audio dari tab atau layar (misalnya Zoom, Google Mee
 ## Cara kerja
 
 1. `getDisplayMedia` menangkap audio dari tab atau layar yang dibagikan.
-2. Deteksi jeda sederhana (berbasis volume) memotong audio per kalimat.
+2. Deteksi jeda sederhana (berbasis volume) memotong audio per kalimat (jeda sekitar 0,5 detik).
 3. Whisper (via transformers.js) mentranskripsi di browser, memakai WebGPU jika tersedia.
-4. Terjemahan lewat API MyMemory (gratis, tanpa API key).
+4. Selagi lawan bicara masih bicara, caption sementara (abu-abu) diperbarui sekitar tiap 1,3 detik, lalu diganti hasil final saat kalimat selesai.
+5. Koreksi kata: kata yang tidak ada di kamus (KBBI untuk Indonesia, daftar kata Inggris dwyl/english-words) diganti hanya jika ada tepat satu kata kamus yang beda satu huruf. Nama dan kata pendek tidak disentuh. Kolom "Istilah khusus" (nama perusahaan, posisi, teknologi) dipakai untuk mencocokkan kata yang salah dengar.
+6. Terjemahan lewat API MyMemory (gratis, tanpa API key), hanya untuk kalimat final.
+
+Kamus hanya menangkap salah eja yang jelas. Kesalahan berupa kata lain yang berbunyi mirip tidak bisa diperbaiki kamus, jadi pilih bahasa secara eksplisit (jangan "Otomatis") dan pakai model Base atau lebih besar untuk akurasi terbaik.
 
 Audio tidak dikirim ke server mana pun. Hanya teks hasil transkripsi yang dikirim ke MyMemory saat terjemahan aktif.
 
