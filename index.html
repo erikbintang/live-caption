@@ -17,6 +17,7 @@ label{display:flex;flex-direction:column;gap:3px;font-size:13px;color:var(--mute
 select,button,input{font:inherit;color:var(--ink)}
 input[type=text]{width:230px;padding:7px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg)}
 .row.live p{opacity:.6}
+label.chk{flex-direction:row;align-items:center;gap:6px;padding-bottom:9px;color:var(--ink)}
 select{padding:7px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg)}
 button{padding:9px 16px;border:1px solid var(--line);border-radius:6px;background:var(--bg);cursor:pointer}
 button.go{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:700}
@@ -52,9 +53,11 @@ body.pip #feed{container-type:inline-size;padding:10px 14px;gap:8px}
     <select id="model">
       <option value="onnx-community/whisper-tiny">Tiny (cepat, kurang akurat)</option>
       <option value="onnx-community/whisper-base" selected>Base (seimbang)</option>
+      <option value="onnx-community/whisper-small">Small (lebih akurat untuk Indonesia, unduhan besar)</option>
     </select></label>
   <label>Istilah khusus (pisahkan koma)
     <input id="terms" type="text" placeholder="nama perusahaan, posisi, teknologi"></label>
+  <label class="chk"><input id="fix" type="checkbox" checked> Koreksi otomatis</label>
   <label>Ukuran teks
     <input id="size" type="range" min="16" max="56" value="28"></label>
   <span class="sp"></span>
@@ -224,24 +227,31 @@ async function translate(q, tgt) {
 }
 
 $('#go').onclick = () => running ? stop() : start();
-// Koreksi kata: kamus KBBI (Indonesia) dan daftar kata Inggris, diunduh sekali lalu di-cache browser.
-// Kata yang tidak ada di kamus hanya diganti jika ada TEPAT SATU kata kamus yang beda satu huruf.
-// Nama (huruf kapital di tengah kalimat) dan kata pendek tidak disentuh.
+// Auto-correct: kata yang tidak dikenal diganti kata kamus terdekat yang paling sering dipakai.
+// Sumber: KBBI (Indonesia), daftar kata Inggris, dan daftar frekuensi kata (hermitdave/FrequencyWords).
+// Diunduh sekali, lalu di-cache browser. Nama (kapital di tengah kalimat) dan kata pendek tidak disentuh.
+const RAW = 'https://raw.githubusercontent.com/';
 const DICT_URL = {
-  id: 'https://raw.githubusercontent.com/damzaky/kumpulan-kata-bahasa-indonesia-KBBI/master/list_1.0.0.txt',
-  en: 'https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt'
+  id: RAW + 'damzaky/kumpulan-kata-bahasa-indonesia-KBBI/master/list_1.0.0.txt',
+  en: RAW + 'dwyl/english-words/master/words_alpha.txt'
 };
-const dict = {id: null, en: null};
+const FREQ_URL = {
+  id: RAW + 'hermitdave/FrequencyWords/master/content/2018/id/id_50k.txt',
+  en: RAW + 'hermitdave/FrequencyWords/master/content/2018/en/en_50k.txt'
+};
+const dict = {id: null, en: null}, freq = {id: null, en: null};
+const VALID = 300; // kata dengan frekuensi >= ini dianggap benar walau tidak ada di kamus
 
 async function loadDicts() {
   const l = $('#src').value;
-  const need = (l === 'auto' ? ['id', 'en'] : [l]).filter(k => DICT_URL[k] && !dict[k]);
-  await Promise.all(need.map(async k => {
-    try {
-      const t = await (await fetch(DICT_URL[k], {cache:'force-cache'})).text();
-      dict[k] = new Set(t.split(/\r?\n/).map(w => w.trim().toLowerCase()));
-    } catch { /* tanpa kamus, caption tetap jalan */ }
-  }));
+  const langs = l === 'auto' ? ['id', 'en'] : [l];
+  const get = async url => (await fetch(url, {cache: 'force-cache'})).text();
+  await Promise.all(langs.flatMap(k => [
+    !dict[k] && DICT_URL[k] && get(DICT_URL[k]).then(t => { dict[k] = new Set(t.split(/\r?\n/).map(w => w.trim().toLowerCase())); }).catch(() => {}),
+    !freq[k] && FREQ_URL[k] && get(FREQ_URL[k]).then(t => {
+      freq[k] = new Map(t.split(/\r?\n/).map(r => r.split(' ')).filter(r => r[1]).map(r => [r[0], +r[1]]));
+    }).catch(() => {})
+  ].filter(Boolean)));
 }
 
 const ALPHA = 'abcdefghijklmnopqrstuvwxyz';
@@ -264,29 +274,48 @@ function dist(a, b) {
 }
 const getTerms = () => [...new Set($('#terms').value.split(/[,\n]+/).flatMap(t => t.trim().split(/\s+/)).filter(t => t.length >= 2))];
 
-function fixWord(w, sets, terms, isName) {
+const fq = (w, ks) => Math.max(0, ...ks.map(k => freq[k]?.get(w) || 0));
+const known = (w, ks) => ks.some(k => dict[k]?.has(w)) || fq(w, ks) >= VALID;
+
+function bestCandidate(lw, ks, pool, minFreq) {
+  const score = c => fq(c, ks) * (c.length > lw.length ? 1.5 : c.length === lw.length ? 1 : 0.7);
+  const ranked = pool.map(c => [c, score(c)]).sort((x, y) => y[1] - x[1]);
+  if (!ranked.length) return null;
+  const [best, bs] = ranked[0], own = fq(lw, ks);
+  if (bs === 0) return ranked.length === 1 ? best : null;       // hanya ada di KBBI: pakai jika satu-satunya
+  if (fq(best, ks) < minFreq || fq(best, ks) < own * 5) return null;
+  if (ranked[1] && ranked[1][1] * 2 > bs) return null;           // terlalu ambigu
+  return best;
+}
+
+function fixWord(w, ks, terms, isName) {
   const lw = w.toLowerCase();
   for (const t of terms) {
     const lt = t.toLowerCase();
     if (lw === lt) return t;
     if (lt.length >= 5 && lw.length >= 4 && dist(lw, lt) <= (lt.length >= 8 ? 2 : 1)) return t;
   }
-  if (isName || lw.length < 4 || !sets.length || sets.some(s => s.has(lw))) return w;
-  const c = [...edits1(lw)].filter(e => sets.some(s => s.has(e)));
-  if (c.length !== 1) return w;
-  return w[0] !== lw[0] ? c[0][0].toUpperCase() + c[0].slice(1) : c[0];
+  if (isName || lw.length < 4 || !ks.length || known(lw, ks)) return w;
+  const e1 = [...edits1(lw)];
+  let c = bestCandidate(lw, ks, e1.filter(e => known(e, ks)), 100);
+  if (!c && lw.length >= 7 && lw.length <= 12) {                // salah dua huruf: lebih ketat
+    const s = new Set(); for (const e of e1) for (const e2 of edits1(e)) s.add(e2);
+    c = bestCandidate(lw, ks, [...s].filter(e => known(e, ks)), 1000);
+  }
+  if (!c) return w;
+  return w[0] !== lw[0] ? c[0].toUpperCase() + c.slice(1) : c;
 }
 
 function correct(text) {
-  const l = $('#src').value, sets = [];
-  if ((l === 'id' || l === 'auto') && dict.id) sets.push(dict.id);
-  if ((l === 'en' || l === 'auto') && dict.en) sets.push(dict.en);
+  if (!$('#fix').checked) return text;
+  const l = $('#src').value;
+  const ks = (l === 'auto' ? ['id', 'en'] : [l]).filter(k => dict[k] || freq[k]);
   const terms = getTerms();
-  if (!sets.length && !terms.length) return text;
+  if (!ks.length && !terms.length) return text;
   return text.replace(/[A-Za-z]+/g, (w, off) => {
     const upper = w[0] !== w[0].toLowerCase();
     const sentenceStart = off === 0 || /[.?!]\s+$/.test(text.slice(0, off));
-    return fixWord(w, sets, terms, upper && !sentenceStart);
+    return fixWord(w, ks, terms, upper && !sentenceStart);
   });
 }
 
